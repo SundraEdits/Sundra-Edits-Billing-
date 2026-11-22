@@ -1,5 +1,5 @@
 
-name: Build APK from Uploaded ZIP
+name: Build Sundra Edits APK
 
 on:
   push:
@@ -17,68 +17,141 @@ permissions:
 
 jobs:
   build:
+    name: Extract ZIP and Build APK
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Download repository files
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      # 2. Install Java 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
+      # 3. Install Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
 
-      - name: Find and Extract Project ZIP
+      # 4. Find and extract ZIP
+      - name: Extract Android Project ZIP
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
+          shopt -s nullglob
           ZIP_FILES=( *.zip )
 
-          if [ ! -f "${ZIP_FILES[0]}" ] || [ "${#ZIP_FILES[@]}" -ne 1 ]; then
-            echo "Repository root must contain exactly one ZIP file."
+          if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Root folder must contain exactly one ZIP."
+            echo "Found: ${#ZIP_FILES[@]}"
             exit 1
           fi
 
           ZIP_FILE="${ZIP_FILES[0]}"
 
-          echo "Using ZIP: $ZIP_FILE"
-
-          unzip -t "$ZIP_FILE"
+          echo "Selected ZIP: $ZIP_FILE"
 
           mkdir -p "$RUNNER_TEMP/sundra-project"
 
-          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/sundra-project"
+          python3 - "$ZIP_FILE" "$RUNNER_TEMP/sundra-project" <<'PY'
+          import sys
+          import zipfile
 
-          PROJECT_DIR=$(find "$RUNNER_TEMP/sundra-project" \
-            -name settings.gradle.kts -printf '%h\n' | head -n 1)
+          zip_file = sys.argv[1]
+          output_dir = sys.argv[2]
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "Android project not found inside ZIP."
+          try:
+              with zipfile.ZipFile(zip_file, "r") as archive:
+                  bad_file = archive.testzip()
+
+                  if bad_file:
+                      raise SystemExit(
+                          f"ZIP integrity error: {bad_file}"
+                      )
+
+                  archive.extractall(output_dir)
+
+          except zipfile.BadZipFile as error:
+              raise SystemExit(f"Invalid ZIP: {error}")
+
+          print("ZIP integrity check passed.")
+          print("ZIP extraction completed.")
+          PY
+
+          # Locate Android project
+          mapfile -t PROJECT_FILES < <(
+            find "$RUNNER_TEMP/sundra-project" \
+              -type f \
+              -name settings.gradle.kts \
+              -not -path '*/.github/*'
+          )
+
+          if [ "${#PROJECT_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Expected one Android project."
+            echo "Found: ${#PROJECT_FILES[@]}"
+            printf '%s\n' "${PROJECT_FILES[@]}"
             exit 1
           fi
 
-          test -f "$PROJECT_DIR/build.gradle.kts"
-          test -f "$PROJECT_DIR/app/build.gradle.kts"
-          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          PROJECT_DIR="$(dirname "${PROJECT_FILES[0]}")"
+
+          # Check required files
+          for FILE in \
+            build.gradle.kts \
+            app/build.gradle.kts \
+            app/src/main/AndroidManifest.xml
+          do
+            if [ ! -f "$PROJECT_DIR/$FILE" ]; then
+              echo "ERROR: Missing file: $FILE"
+              exit 1
+            fi
+          done
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Build Debug APK
-        run: |
-          cd "$PROJECT_DIR"
-          gradle --no-daemon --stacktrace clean :app:assembleDebug
+          echo "Android project located successfully."
 
-      - name: Upload APK
+      # 5. Build APK
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            clean \
+            :app:assembleDebug
+
+      # 6. Verify APK
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: APK not generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully:"
+          ls -lh "$APK"
+
+      # 7. Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SUNDRA-EDITS-debug-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          name: SUNDRA-EDITS-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
