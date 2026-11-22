@@ -1,0 +1,84 @@
+
+name: Build APK from Uploaded ZIP
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-apk.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Find and Extract Project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILES=( *.zip )
+
+          if [ ! -f "${ZIP_FILES[0]}" ] || [ "${#ZIP_FILES[@]}" -ne 1 ]; then
+            echo "Repository root must contain exactly one ZIP file."
+            exit 1
+          fi
+
+          ZIP_FILE="${ZIP_FILES[0]}"
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          unzip -t "$ZIP_FILE"
+
+          mkdir -p "$RUNNER_TEMP/sundra-project"
+
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/sundra-project"
+
+          PROJECT_DIR=$(find "$RUNNER_TEMP/sundra-project" \
+            -name settings.gradle.kts -printf '%h\n' | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Android project not found inside ZIP."
+            exit 1
+          fi
+
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Build Debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace clean :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUNDRA-EDITS-debug-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
